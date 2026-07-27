@@ -1,505 +1,374 @@
 /**
  * useCitySimulation.js  —  src/hooks/useCitySimulation.js
- * Système M'LAM — Supervision urbaine de Fianarantsoa, Madagascar
+ * M'LAM M'ikolo's Learned App Monitoring — Fianarantsoa, Madagascar
  *
- * Architecture performante à deux flux :
- *   - simulationRef.current.vehicles : état mutable, lu par le canvas à 60 FPS
- *     sans déclencher aucun re-render React.
- *   - useState (metrics, anomalies, kpis) : mis à jour toutes les 2.5 s
- *     uniquement, pour alimenter les panneaux latéraux.
+ * Routes chargees dynamiquement depuis /public/data/routes_output.json
+ * via fetch au montage. Tant que le chargement est en cours, la simulation
+ * tourne avec une flotte vide — aucun crash, aucun re-render bloquant.
  *
- * Les véhicules sont verrouillés sur leurs axes routiers via interpolation
- * linéaire (LERP) entre des waypoints haute densité espacés de 60 à 120 m.
- * La vitesse en km/h est convertie en degrés/seconde à chaque frame pour
- * garantir un avancement proportionnel au delta-temps réel.
+ * Architecture a deux flux (inchangee depuis la version precedente) :
+ *   simulationRef.current.vehicles — mute a 60 FPS via requestAnimationFrame,
+ *   jamais copie dans useState. Lu directement par le canvas de CityMap.jsx.
+ *
+ *   metrics / anomalies / kpis — React state, commit toutes les 2.5 s.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-// ═════════════════════════════════════════════════════════════════════════════
-// CONSTANTES DE LA VILLE
-// ═════════════════════════════════════════════════════════════════════════════
 
-/** Point central de Fianarantsoa — utilisé comme repère géographique. */
-export const CITY_CENTER = [-21.4526, 47.0857];
+/** Statuts possibles d'un vehicule. */
+const STATUT_DRIVING = 'DRIVING';
+const STATUT_PARKED  = 'PARKED';
 
-/** Nombre maximum d'anomalies conservées dans le fil d'actualité. */
-const MAX_ANOMALIES = 25;
-
-/** Intervalle du tick lent (ms) — seul moment où React re-rend. */
-const SLOW_TICK_MS = 2500;
-
-/** 1 degré de latitude équivaut approximativement à 111 km. */
-const DEG_PER_KM = 1 / 111;
-
-// ═════════════════════════════════════════════════════════════════════════════
-// DÉFINITION DES AXES ROUTIERS HAUTE DENSITÉ
-//
-// Chaque route est un tableau ordonné d'objets { nom, coords: [lat, lng] }.
-// Les points sont espacés de 60 à 120 m pour coller aux vraies courbes des
-// rues de Fianarantsoa visibles sur OpenStreetMap.
-// ═════════════════════════════════════════════════════════════════════════════
-
-const ROUTES = {
-
-  /**
-   * AXE A — RN7 Nord-Sud
-   * Entre depuis la sortie Nord (direction Ambositra), traverse le quartier
-   * Isada, longe Anjoma, passe par le rond-point d'Ampasambazaha, descend
-   * vers Tanambao, Tsianolondroa et sort vers le Sud (direction Ambalavao).
-   */
-  RN7_NS: {
-    label: 'RN7 — Axe Nord / Sud',
-    waypoints: [
-      { nom: 'Sortie Nord / Ambositra',      c: [-21.4192, 47.0785] },
-      { nom: 'Entree Isada Nord',            c: [-21.4220, 47.0790] },
-      { nom: 'Isada — Depot bus',            c: [-21.4248, 47.0796] },
-      { nom: 'Isada Centre',                 c: [-21.4275, 47.0801] },
-      { nom: 'Isada Sud',                    c: [-21.4302, 47.0806] },
-      { nom: 'Debut Anjoma',                 c: [-21.4328, 47.0811] },
-      { nom: 'Anjoma Nord',                  c: [-21.4352, 47.0815] },
-      { nom: 'Carrefour Anjoma principal',   c: [-21.4376, 47.0820] },
-      { nom: 'Anjoma Centre',                c: [-21.4398, 47.0824] },
-      { nom: 'Anjoma Sud',                   c: [-21.4420, 47.0829] },
-      { nom: 'Zone periurbaine',             c: [-21.4440, 47.0834] },
-      { nom: 'Pont voie ferrée FCE',         c: [-21.4458, 47.0839] },
-      { nom: 'Entree Ampasambazaha',         c: [-21.4476, 47.0843] },
-      { nom: 'Ampasambazaha Nord',           c: [-21.4493, 47.0848] },
-      { nom: 'Rond-point Ampasambazaha',     c: [-21.4510, 47.0852] },
-      { nom: 'Ampasambazaha Sud',            c: [-21.4522, 47.0856] },
-      { nom: 'Centre-Ville / Mairie',        c: [-21.4530, 47.0858] },
-      { nom: 'Carrefour Prefecture',         c: [-21.4542, 47.0862] },
-      { nom: 'Avenue de la Republique',      c: [-21.4558, 47.0867] },
-      { nom: 'Tanambao Nord',                c: [-21.4575, 47.0872] },
-      { nom: 'Tanambao — Marche',            c: [-21.4593, 47.0877] },
-      { nom: 'Tanambao Centre',              c: [-21.4612, 47.0882] },
-      { nom: 'Tanambao Sud',                 c: [-21.4630, 47.0888] },
-      { nom: 'Tsianolondroa Nord',           c: [-21.4650, 47.0893] },
-      { nom: 'Tsianolondroa Centre',         c: [-21.4672, 47.0898] },
-      { nom: 'Tsianolondroa Sud',            c: [-21.4695, 47.0904] },
-      { nom: 'Zone de sortie Sud',           c: [-21.4718, 47.0910] },
-      { nom: 'Sortie Sud / Ambalavao',       c: [-21.4742, 47.0916] },
-    ],
-  },
-
-  /**
-   * AXE B — Montée vers la Haute Ville
-   * Démarre au rond-point d'Ampasambazaha, emprunte les lacets escarpés
-   * de la colline, passe par le quartier Ambozontany et arrive à la
-   * Cathédrale Saint-Laurent et aux écoles de la Haute Ville.
-   */
-  HAUTE_VILLE: {
-    label: 'Haute Ville — Montée / Descente',
-    waypoints: [
-      { nom: 'Rond-point Ampasambazaha',     c: [-21.4510, 47.0852] },
-      { nom: 'Debut montee',                 c: [-21.4502, 47.0840] },
-      { nom: 'Premier lacet Est',            c: [-21.4494, 47.0827] },
-      { nom: 'Premier lacet Ouest',          c: [-21.4486, 47.0813] },
-      { nom: 'Replat intermediaire',         c: [-21.4477, 47.0800] },
-      { nom: 'Deuxieme virage Est',          c: [-21.4469, 47.0788] },
-      { nom: 'Deuxieme virage Ouest',        c: [-21.4460, 47.0776] },
-      { nom: 'Mi-montee',                    c: [-21.4452, 47.0764] },
-      { nom: 'Troisieme lacet',              c: [-21.4443, 47.0752] },
-      { nom: 'Quatrieme lacet',              c: [-21.4434, 47.0741] },
-      { nom: 'Entree Ambozontany',           c: [-21.4425, 47.0730] },
-      { nom: 'Rue Ambozontany principale',   c: [-21.4416, 47.0720] },
-      { nom: 'Carrefour Cathedrale',         c: [-21.4407, 47.0710] },
-      { nom: 'Cathedrale Saint-Laurent',     c: [-21.4398, 47.0700] },
-      { nom: 'Ecoles de la Haute Ville',     c: [-21.4389, 47.0690] },
-      { nom: 'Sommet Haute Ville',           c: [-21.4380, 47.0680] },
-    ],
-  },
-
-  /**
-   * AXE C — Ligne Est-Ouest (Gare FCE → Marché Central)
-   * Part de la Gare des voyageurs FCE, longe la voie ferrée, passe par
-   * le centre administratif et rejoint le marché central d'Anjoma.
-   */
-  GARE_MARCHE: {
-    label: 'Axe Gare FCE — Marche',
-    waypoints: [
-      { nom: 'Gare FCE — Quai voyageurs',   c: [-21.4550, 47.0924] },
-      { nom: 'Parvis Gare',                  c: [-21.4545, 47.0913] },
-      { nom: 'Sortie Gare Ouest',            c: [-21.4540, 47.0902] },
-      { nom: 'Rue longeant la voie',         c: [-21.4535, 47.0890] },
-      { nom: 'Passage a niveau',             c: [-21.4530, 47.0878] },
-      { nom: 'Rue du Stade',                 c: [-21.4528, 47.0867] },
-      { nom: 'Carrefour Centre',             c: [-21.4526, 47.0857] },
-      { nom: 'Avenue Principale Ouest',      c: [-21.4524, 47.0845] },
-      { nom: 'Rue Commerce',                 c: [-21.4522, 47.0833] },
-      { nom: 'Debut zone marche',            c: [-21.4520, 47.0821] },
-      { nom: 'Entree Marche Anjoma',         c: [-21.4516, 47.0808] },
-      { nom: 'Marche Anjoma — Hall Est',     c: [-21.4510, 47.0796] },
-      { nom: 'Marche Anjoma — Hall Ouest',   c: [-21.4505, 47.0783] },
-      { nom: 'Place du Marche',              c: [-21.4498, 47.0771] },
-    ],
-  },
-
-  /**
-   * AXE D — Boucle intérieure Anjoma
-   * Dessert les rues intérieures du quartier résidentiel Anjoma.
-   * Utilisée par les taxis locaux et les motos de livraison.
-   */
-  ANJOMA_LOCAL: {
-    label: 'Boucle Anjoma',
-    waypoints: [
-      { nom: 'Carrefour RN7 / Anjoma',      c: [-21.4376, 47.0820] },
-      { nom: 'Rue Interieure Anjoma Nord',   c: [-21.4382, 47.0809] },
-      { nom: 'Anjoma — Ecole primaire',      c: [-21.4388, 47.0798] },
-      { nom: 'Anjoma — Carrefour interieur', c: [-21.4394, 47.0787] },
-      { nom: 'Anjoma Est',                   c: [-21.4400, 47.0776] },
-      { nom: 'Anjoma Sud-Est',               c: [-21.4408, 47.0787] },
-      { nom: 'Anjoma Sud',                   c: [-21.4414, 47.0800] },
-      { nom: 'Anjoma — Retour RN7',          c: [-21.4412, 47.0813] },
-      { nom: 'Carrefour RN7 / Anjoma',       c: [-21.4376, 47.0820] },
-    ],
-  },
-
-  /**
-   * AXE E — Axe Tanambao intérieur
-   * Dessert les rues résidentielles de Tanambao, zone dense au sud du centre.
-   */
-  TANAMBAO_INTERNE: {
-    label: 'Tanambao — Rues interieures',
-    waypoints: [
-      { nom: 'Entree Tanambao / RN7',        c: [-21.4575, 47.0872] },
-      { nom: 'Rue Principale Tanambao',      c: [-21.4583, 47.0883] },
-      { nom: 'Marche Tanambao Est',          c: [-21.4592, 47.0894] },
-      { nom: 'Ecole Tanambao',               c: [-21.4601, 47.0904] },
-      { nom: 'Tanambao Nord-Est',            c: [-21.4610, 47.0914] },
-      { nom: 'Hopital Ivato',                c: [-21.4618, 47.0924] },
-      { nom: 'Sortie Tanambao Est',          c: [-21.4625, 47.0934] },
-    ],
-  },
-
+const TYPES_MISSION = {
+  SCHOOL_DROP:      { label: 'Depose scolaire',            dureeMin: 15,  dureeMax: 40  },
+  WORK_COMMUTE:     { label: 'Trajet domicile-travail',    dureeMin: 180, dureeMax: 480 },
+  MEDICAL_VISIT:    { label: 'Visite medicale',            dureeMin: 60,  dureeMax: 150 },
+  MARKET_STOP:      { label: 'Arret marche',               dureeMin: 20,  dureeMax: 60  },
+  PASSENGER_PICKUP: { label: 'Prise en charge passager',   dureeMin: 5,   dureeMax: 15  },
+  HOME_RETURN:      { label: 'Retour domicile',            dureeMin: 240, dureeMax: 600 },
+  PATROL:           { label: 'Patrouille',                 dureeMin: 10,  dureeMax: 30  },
+  SERVICE_STOP:     { label: 'Arret de service',           dureeMin: 30,  dureeMax: 90  },
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// TYPES DE VÉHICULES
-// ═════════════════════════════════════════════════════════════════════════════
-
-const TYPES_VEHICULES = {
-  TAXIBE: {
-    label:       'Taxi-be',
-    vitesseMin:  10,
-    vitesseMax:  38,
-    chocChance:  0.0012,
-    arretChance: 0.07,   // S'arrête souvent aux arrêts
-    taille:      5,
-    couleur:     '#FBBF24',
-  },
-  TAXI: {
-    label:       'Taxi',
-    vitesseMin:  14,
-    vitesseMax:  54,
-    chocChance:  0.0022,
-    arretChance: 0.035,
-    taille:      4,
-    couleur:     '#60A5FA',
-  },
-  MOTO: {
-    label:       'Moto',
-    vitesseMin:  18,
-    vitesseMax:  72,
-    chocChance:  0.005,
-    arretChance: 0.012,  // Se faufile et s'arrête peu
-    taille:      3,
-    couleur:     '#34D399',
-  },
-  PARTICULIER: {
-    label:       'Particulier',
-    vitesseMin:  12,
-    vitesseMax:  48,
-    chocChance:  0.0028,
-    arretChance: 0.025,
-    taille:      4,
-    couleur:     '#A78BFA',
-  },
-  SECOURS: {
-    label:       'Secours',
-    vitesseMin:  40,
-    vitesseMax:  88,
-    chocChance:  0.0004,
-    arretChance: 0.004,
-    taille:      5,
-    couleur:     '#F87171',
-  },
+const SEQUENCE_MISSIONS_PAR_TYPE = {
+  TAXIBE:      ['SERVICE_STOP', 'PASSENGER_PICKUP'],
+  TAXI:        ['PASSENGER_PICKUP', 'MARKET_STOP', 'MEDICAL_VISIT'],
+  MOTO:        ['PASSENGER_PICKUP', 'MARKET_STOP'],
+  PARTICULIER: ['SCHOOL_DROP', 'WORK_COMMUTE', 'MARKET_STOP', 'HOME_RETURN'],
+  SECOURS:     ['PATROL', 'SERVICE_STOP'],
 };
 
-// ═════════════════════════════════════════════════════════════════════════════
-// BLUEPRINT DE LA FLOTTE — 157 véhicules
-// ═════════════════════════════════════════════════════════════════════════════
+function rndInt2(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
-const BLUEPRINT_FLOTTE = [
-  // RN7 — axe principal, plus forte densité
-  ...Array(14).fill({ type: 'TAXIBE',      route: 'RN7_NS',          prefix: 'A-TB' }),
-  ...Array(14).fill({ type: 'TAXI',        route: 'RN7_NS',          prefix: 'A-TX' }),
-  ...Array(18).fill({ type: 'MOTO',        route: 'RN7_NS',          prefix: 'A-MO' }),
-  ...Array(10).fill({ type: 'PARTICULIER', route: 'RN7_NS',          prefix: 'A-PR' }),
-  ...Array(4).fill({  type: 'SECOURS',     route: 'RN7_NS',          prefix: 'A-SC' }),
+function genererMission(typeVehicule, seqIdx) {
+  const sequence    = SEQUENCE_MISSIONS_PAR_TYPE[typeVehicule] ?? ['SERVICE_STOP'];
+  const idx         = seqIdx % sequence.length;
+  const missionType = sequence[idx];
+  const config      = TYPES_MISSION[missionType] ?? TYPES_MISSION.SERVICE_STOP;
+  return {
+    missionType,
+    label:          config.label,
+    duree:          rndInt2(config.dureeMin, config.dureeMax),
+    prochainSeqIdx: idx + 1,
+  };
+}
 
-  // Haute Ville — montée escarpée
-  ...Array(6).fill({  type: 'TAXIBE',      route: 'HAUTE_VILLE',     prefix: 'B-TB' }),
-  ...Array(8).fill({  type: 'TAXI',        route: 'HAUTE_VILLE',     prefix: 'B-TX' }),
-  ...Array(10).fill({ type: 'MOTO',        route: 'HAUTE_VILLE',     prefix: 'B-MO' }),
-  ...Array(6).fill({  type: 'PARTICULIER', route: 'HAUTE_VILLE',     prefix: 'B-PR' }),
-  ...Array(2).fill({  type: 'SECOURS',     route: 'HAUTE_VILLE',     prefix: 'B-SC' }),
+function choisirProchainAxe(routesDict, cleRouteActuelle) {
+  const cles = Object.keys(routesDict ?? {}).filter(
+    cle => Array.isArray(routesDict[cle]) && routesDict[cle].length >= 2
+  );
+  if (cles.length <= 1) return cleRouteActuelle;
+  const autresCles = cles.filter(c => c !== cleRouteActuelle);
+  return autresCles[rndInt2(0, autresCles.length - 1)];
+}
 
-  // Gare — Marche, axe Est-Ouest
-  ...Array(8).fill({  type: 'TAXIBE',      route: 'GARE_MARCHE',     prefix: 'C-TB' }),
-  ...Array(8).fill({  type: 'TAXI',        route: 'GARE_MARCHE',     prefix: 'C-TX' }),
-  ...Array(12).fill({ type: 'MOTO',        route: 'GARE_MARCHE',     prefix: 'C-MO' }),
-  ...Array(4).fill({  type: 'PARTICULIER', route: 'GARE_MARCHE',     prefix: 'C-PR' }),
-  ...Array(2).fill({  type: 'SECOURS',     route: 'GARE_MARCHE',     prefix: 'C-SC' }),
+// ─────────────────────────────────────────────────────────────────────────────
+// Constantes
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // Boucle Anjoma locale
-  ...Array(6).fill({  type: 'TAXIBE',      route: 'ANJOMA_LOCAL',    prefix: 'D-TB' }),
-  ...Array(6).fill({  type: 'TAXI',        route: 'ANJOMA_LOCAL',    prefix: 'D-TX' }),
-  ...Array(8).fill({  type: 'MOTO',        route: 'ANJOMA_LOCAL',    prefix: 'D-MO' }),
-  ...Array(3).fill({  type: 'SECOURS',     route: 'ANJOMA_LOCAL',    prefix: 'D-SC' }),
+export const CITY_CENTER                    = [-21.4526, 47.0857];
+const URL_ROUTES                            = '/data/routes_output.json';
+const DEG_PAR_KM                            = 1 / 111;
+const INTERVALLE_TICK_LENT_MS               = 2500;
+const MAX_ANOMALIES                         = 25;
+const COULEUR_NEUTRE                        = '#94A3B8';
+const COULEUR_ALERTE_CRITIQUE               = '#EF4444';
+const COULEUR_ALERTE_WARNING                = '#F97316';
 
-  // Tanambao interieur
-  ...Array(4).fill({  type: 'TAXIBE',      route: 'TANAMBAO_INTERNE', prefix: 'E-TB' }),
-  ...Array(4).fill({  type: 'TAXI',        route: 'TANAMBAO_INTERNE', prefix: 'E-TX' }),
-  ...Array(6).fill({  type: 'MOTO',        route: 'TANAMBAO_INTERNE', prefix: 'E-MO' }),
-  ...Array(3).fill({  type: 'PARTICULIER', route: 'TANAMBAO_INTERNE', prefix: 'E-PR' }),
+const PROBABILITE_ACCIDENT_PAR_TICK         = 0.05;
+const MAX_ACCIDENTS_SIMULTANES              = 1;
+const DUREE_ACCIDENT_MIN_MS                 = 8000;
+const DUREE_ACCIDENT_MAX_MS                 = 15000;
+
+const CONGESTION_NIVEAU_MAX                     = 8;
+const AJUSTEMENT_CONGESTION_INTERVALLE_MIN_MS   = 10000;
+const AJUSTEMENT_CONGESTION_INTERVALLE_MAX_MS   = 15000;
+
+const INTERVALLE_POLLUTION_MIN_MS           = 30000;
+const INTERVALLE_POLLUTION_MAX_MS           = 45000;
+const TAUX_ACCUMULATION_POLLUTION           = 0.30;
+const TAUX_DISSIPATION_POLLUTION            = 0.12;
+const SEUIL_POLLUTION_ANOMALIE              = 65;
+const CAUSES_POLLUTION = [
+  "Incinération sauvage d'ordures ménagères et déchets plastiques dans le quartier.",
+  "Émissions industrielles diffuses et fumées d'ateliers de briqueterie/combustion.",
+  "Accumulation de gaz d'échappement (vieux moteurs Diesel et gaz de Taxibe) couplée à une absence de vent.",
+  "Embouteillage persistant generant une accumulation prolongee de gaz d'echappement.",
 ];
 
-// ═════════════════════════════════════════════════════════════════════════════
-// FONCTIONS UTILITAIRES PURES (hors du hook pour éviter les re-créations)
-// ═════════════════════════════════════════════════════════════════════════════
-
-/** Nombre aléatoire flottant dans [min, max]. */
-function rnd(min, max) { return Math.random() * (max - min) + min; }
-
-/** Nombre entier aléatoire dans [min, max]. */
-function rndInt(min, max) { return Math.floor(rnd(min, max + 1)); }
-
-/** Interpolation linéaire entre a et b au facteur t ∈ [0, 1]. */
-function lerp(a, b, t) { return a + (b - a) * t; }
-
-/** Contrainte d'une valeur dans [min, max]. */
-function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
-
-/** Variation aléatoire autour d'une base, contrainte dans [min, max]. */
-function jitter(base, delta, min, max) {
-  return clamp(base + (Math.random() * 2 - 1) * delta, min, max);
+function tirerCausePollution() {
+  return CAUSES_POLLUTION[rndInt2(0, CAUSES_POLLUTION.length - 1)];
 }
 
-/** Dérivation du statut à partir de seuils d'alerte. */
-function calcStatut(valeur, seuilAlerte, seuilCritique) {
-  if (valeur >= seuilCritique) return 'critical';
-  if (valeur >= seuilAlerte)   return 'elevated';
-  return 'ok';
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Types de vehicules
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** Distance euclidienne approchée entre deux points [lat, lng] en degrés. */
+const TYPES_VEHICULES = {
+  TAXIBE:      { label: 'Taxi-be',     vitesseMin: 10, vitesseMax: 38, chocChance: 0.0012, arretChance: 0.07,  taille: 5, couleur: '#FBBF24' },
+  TAXI:        { label: 'Taxi',        vitesseMin: 15, vitesseMax: 54, chocChance: 0.0022, arretChance: 0.035, taille: 4, couleur: '#60A5FA' },
+  MOTO:        { label: 'Moto',        vitesseMin: 18, vitesseMax: 72, chocChance: 0.005,  arretChance: 0.012, taille: 3, couleur: '#34D399' },
+  PARTICULIER: { label: 'Particulier', vitesseMin: 12, vitesseMax: 48, chocChance: 0.0028, arretChance: 0.025, taille: 4, couleur: '#A78BFA' },
+  SECOURS:     { label: 'Secours',     vitesseMin: 40, vitesseMax: 88, chocChance: 0.0004, arretChance: 0.004, taille: 5, couleur: '#F87171' },
+};
+
+const TYPE_KEYS = Object.keys(TYPES_VEHICULES);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fonctions utilitaires pures
+// ─────────────────────────────────────────────────────────────────────────────
+
+function rnd(min, max)        { return Math.random() * (max - min) + min; }
+function rndInt(min, max)     { return Math.floor(rnd(min, max + 1)); }
+function lerp(a, b, t)        { return a + (b - a) * t; }
+function clamp(v, min, max)   { return Math.max(min, Math.min(max, v)); }
+function jitter(base, delta, min, max) { return clamp(base + (Math.random() * 2 - 1) * delta, min, max); }
+function calcStatut(v, warn, crit)     { return v >= crit ? 'critical' : v >= warn ? 'elevated' : 'ok'; }
+
 function longueurSegment(a, b) {
   const dLat = b[0] - a[0];
   const dLng = b[1] - a[1];
   return Math.sqrt(dLat * dLat + dLng * dLng);
 }
 
-/** Retourne les coordonnées brutes [lat, lng] d'une route. */
-function obtenirCoords(cleRoute) {
-  return (ROUTES[cleRoute]?.waypoints ?? []).map(w => w.c);
+function calculerFacteurRalentissement(cleRoute, segIdx, indexSegmentsImpactes) {
+  if (!indexSegmentsImpactes || !indexSegmentsImpactes[cleRoute]) return 1.0;
+  if (indexSegmentsImpactes[cleRoute].includes(segIdx)) return 0.25;
+  return 1.0;
 }
 
-/** Nom du waypoint à l'index donné dans une route. */
-function nomWaypoint(cleRoute, index) {
-  return ROUTES[cleRoute]?.waypoints?.[index]?.nom ?? 'Destination';
+function normaliserRoutes(data) {
+  const sortie = {};
+  if (!data || typeof data !== 'object') return sortie;
+
+  if (Array.isArray(data.rn7) && data.rn7.length > 0) {
+    sortie.RN7 = data.rn7;
+  }
+
+  if (data.axes_secondaires && !Array.isArray(data.axes_secondaires)) {
+    Object.entries(data.axes_secondaires).forEach(([cle, coords]) => {
+      if (Array.isArray(coords) && coords.length >= 2) {
+        sortie[cle.toUpperCase()] = coords;
+      }
+    });
+  }
+
+  if (Array.isArray(data.axes_secondaires)) {
+    data.axes_secondaires.forEach((coords, i) => {
+      if (Array.isArray(coords) && coords.length >= 2) {
+        sortie[`AXE_SEC_${i + 1}`] = coords;
+      }
+    });
+  }
+
+  Object.entries(data).forEach(([cle, valeur]) => {
+    if (cle === 'rn7' || cle === 'axes_secondaires') return;
+    if (Array.isArray(valeur) && valeur.length >= 2 && Array.isArray(valeur[0])) {
+      sortie[cle.toUpperCase()] = valeur;
+    }
+  });
+
+  return sortie;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// CONSTRUCTION DE L'ÉTAT INITIAL
-// ═════════════════════════════════════════════════════════════════════════════
-
-/**
- * Construit l'ensemble de la flotte en répartissant les véhicules de manière
- * homogène sur leurs routes respectives (aucun bunching au départ).
- */
-function construireVehicules() {
-  return BLUEPRINT_FLOTTE.map((bp, i) => {
-    const type   = TYPES_VEHICULES[bp.type];
-    const coords = obtenirCoords(bp.route);
-    if (coords.length < 2) return null;
-
-    const nbSegments = coords.length - 1;
-
-    // Étalement : chaque véhicule commence à une position unique sur sa route.
-    const progression = i / BLUEPRINT_FLOTTE.length;
-    const positionBrute = progression * nbSegments;
-    const segIdx = clamp(Math.floor(positionBrute), 0, nbSegments - 1);
-    const segT   = positionBrute - segIdx;
-
-    const a = coords[segIdx];
-    const b = coords[Math.min(segIdx + 1, coords.length - 1)];
-
-    const destinationNom = nomWaypoint(bp.route, coords.length - 1);
-
-    return {
-      id:          i,
-      typeKey:     bp.type,
-      typeLabel:   type.label,
-      couleur:     type.couleur,
-      taille:      type.taille,
-      cleRoute:    bp.route,
-      labelRoute:  ROUTES[bp.route]?.label ?? bp.route,
-
-      // Paramètres LERP — la position réelle est l'interpolation de ces valeurs
-      segIdx,
-      segT: clamp(segT, 0, 1),
-      avance: true,
-
-      // Position GPS interpolée (mise à jour à chaque frame)
-      lat: lerp(a[0], b[0], segT),
-      lng: lerp(a[1], b[1], segT),
-
-      // Vitesse en km/h — convertie en degrés/sec dans avancerVehicule()
-      vitesseKmh:   rnd(type.vitesseMin, type.vitesseMax),
-      arrete:       false,
-      dureeArretMs: 0,
-      chocDetecte:  false,
-
-      mission:      `${type.label} : ${ROUTES[bp.route]?.label ?? bp.route} — direction ${destinationNom}`,
-      destination:  destinationNom,
-      phaseTrajet:  0,  // 0 = aller, 1 = retour
-    };
-  }).filter(Boolean);
+function nomDestination(cleRoute, dernierPoint) {
+  const labels = {
+    RN7:                'Terminus RN7',
+    N42:                'Terminus N42',
+    HAUTE_VILLE:        'Cathedrale Saint-Laurent',
+    GARE_TSIANOLONDROA: 'Tsianolondroa',
+    BERAVINA:           'Zone Beravina',
+    ROUTE_CIRCULAIRE:   'Boucle Circulaire',
+  };
+  return labels[cleRoute] ?? `Point ${dernierPoint?.[0]?.toFixed(3) ?? ''}`;
 }
 
-function construireMetriquesInitiales() {
+// ─────────────────────────────────────────────────────────────────────────────
+// Initialisation des métriques
+// ─────────────────────────────────────────────────────────────────────────────
+
+function construireMetriques() {
+  const horodatage = new Date().toISOString();
   return {
     co2: {
-      id: 'co2', label: "Qualite de l'air", sublabel: 'CO2',
-      valeur: 415, unite: 'ppm', max: 1000, fill: 42,
-      statut: 'ok', updatedAt: new Date().toISOString(),
+      id: 'co2', name: 'Dioxyde de carbone',
+      value: 400, max: 800, unit: 'ppm', fill: 50, status: 'ok', updatedAt: horodatage,
     },
     pm25: {
-      id: 'pm25', label: 'Particules fines', sublabel: 'PM2.5',
-      valeur: 13, unite: 'ug/m3', max: 75, fill: 17,
-      statut: 'ok', updatedAt: new Date().toISOString(),
+      id: 'pm25', name: 'Particules fines PM2.5',
+      value: 12.0, max: 50, unit: 'µg/m³', fill: 24, status: 'ok', updatedAt: horodatage,
     },
-    trafic: {
-      id: 'traffic', label: 'Densite trafic', sublabel: 'Reseau',
-      valeur: 58, unite: '%', max: 100, fill: 58,
-      statut: 'ok', updatedAt: new Date().toISOString(),
+    traffic: {
+      id: 'traffic', name: 'Taux de Congestion',
+      value: 35, max: 100, unit: '%', fill: 35, status: 'ok', updatedAt: horodatage,
     },
   };
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// COMPTEUR D'ANOMALIES (module-level pour persister entre les ticks)
-// ═════════════════════════════════════════════════════════════════════════════
+function construireVehicules(routesDict, nombreTotal = 150) {
+  const clesValides = Object.keys(routesDict).filter(
+    cle => Array.isArray(routesDict[cle]) && routesDict[cle].length >= 2
+  );
+  if (clesValides.length === 0) return [];
+
+  const vehicules  = [];
+  let idCompteur   = 0;
+  const poids      = clesValides.map(cle => (cle === 'RN7' ? 3 : 1));
+  const poidsTotal = poids.reduce((a, b) => a + b, 0);
+
+  clesValides.forEach((cleRoute, idxAxe) => {
+    const coords     = routesDict[cleRoute];
+    const nbSegments = coords.length - 1;
+    if (nbSegments < 1) return;
+
+    const partVehicules = Math.max(3, Math.round((poids[idxAxe] / poidsTotal) * nombreTotal));
+
+    for (let i = 0; i < partVehicules; i++) {
+      const typeKey    = TYPE_KEYS[rndInt2(0, TYPE_KEYS.length - 1)];
+      const type       = TYPES_VEHICULES[typeKey];
+      const progression = i / partVehicules;
+      const posBrute    = progression * nbSegments;
+      const segIdx      = clamp(Math.floor(posBrute), 0, nbSegments - 1);
+      const segT        = clamp(posBrute - segIdx, 0, 1);
+      const a           = coords[segIdx];
+      const b           = coords[Math.min(segIdx + 1, coords.length - 1)];
+      const mission0    = genererMission(typeKey, 0);
+
+      vehicules.push({
+        id:           idCompteur++,
+        typeKey,
+        typeLabel:    type.label,
+        couleur:      COULEUR_NEUTRE,
+        couleurBase:  COULEUR_NEUTRE,
+        enAlerte:     null,
+        taille:       type.taille,
+        cleRoute,
+        labelRoute:   cleRoute.replace(/_/g, ' '),
+        segIdx,
+        segT,
+        avance:       true,
+        lat:          lerp(a[0], b[0], segT),
+        lng:          lerp(a[1], b[1], segT),
+        vitesseKmh:   rnd(type.vitesseMin, type.vitesseMax),
+        arrete:       false,
+        dureeArretMs: 0,
+        chocDetecte:  false,
+        status:       STATUT_DRIVING,
+        missionSeqIdx: mission0.prochainSeqIdx,
+        currentMission: {
+          type:                  mission0.missionType,
+          durationAtDestination: mission0.duree,
+          parkingTimer:          0,
+        },
+        mission:     `${type.label} : ${mission0.label} — ${cleRoute.replace(/_/g, ' ')}`,
+        destination: nomDestination(cleRoute, coords[coords.length - 1]),
+        phaseTrajet: 0,
+      });
+    }
+  });
+
+  return vehicules;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fabrique d'anomalies
+// ─────────────────────────────────────────────────────────────────────────────
 
 let compteurAnomalie = 1;
 
 function creerAnomalie(priorite, capteur, zone, description, lat, lng) {
   return {
-    id:          `ALT-FKT-${String(compteurAnomalie++).padStart(3, '0')}`,
-    priority:    priorite,
-    time:        new Date().toLocaleTimeString('fr-MG', { hour: '2-digit', minute: '2-digit' }),
-    sensor:      capteur,
+    id:        `ALT-FKT-${String(compteurAnomalie++).padStart(3, '0')}`,
+    priority:  priorite,
+    time:      new Date().toLocaleTimeString('fr-MG', { hour: '2-digit', minute: '2-digit' }),
+    sensor:    capteur,
     zone,
     description,
-    position:    [lat, lng],
-    reported:    false,
-    timestamp:   new Date().toISOString(),
+    position:  [lat, lng],
+    reported:  false,
+    timestamp: new Date().toISOString(),
   };
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MOTEUR D'AVANCEMENT — avancerVehicule()
-//
-// Avance un véhicule sur son rail par mutation directe (pas de copie d'objet).
-// La mutation directe évite 150+ allocations mémoire par frame.
-//
-// Algorithme :
-//   1. Calculer la distance à parcourir en degrés : v = (km/h) / (3600 * 111)
-//   2. Diviser par la longueur du segment courant pour obtenir dT (incrément)
-//   3. Si dT déborde [0,1], reporter le surplus sur le segment suivant
-//   4. Interpoler la position finale (lat, lng) sur le segment résultant
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// Moteur d'avancement LERP
+// ─────────────────────────────────────────────────────────────────────────────
 
-function avancerVehicule(v, deltaSecondes) {
-  const coords     = obtenirCoords(v.cleRoute);
+function avancerVehicule(v, deltaSecondes, routesDict, indexSegmentsImpactes) {
+
+  // ── ETAT PARKED ───────────────────────────────────────────────────────────
+  if (v.status === STATUT_PARKED) {
+    v.currentMission.parkingTimer += deltaSecondes;
+    if (v.currentMission.parkingTimer >= v.currentMission.durationAtDestination) {
+      const type    = TYPES_VEHICULES[v.typeKey] ?? TYPES_VEHICULES.PARTICULIER;
+      const mission = genererMission(v.typeKey, v.missionSeqIdx);
+      const nouvelAxe = choisirProchainAxe(routesDict, v.cleRoute);
+      const coords    = routesDict?.[nouvelAxe];
+
+      if (Array.isArray(coords) && coords.length >= 2) {
+        v.cleRoute   = nouvelAxe;
+        v.labelRoute = nouvelAxe.replace(/_/g, ' ');
+        v.segIdx     = 0;
+        v.segT       = 0;
+        v.avance     = true;
+        v.lat        = coords[0][0];
+        v.lng        = coords[0][1];
+        v.destination = nomDestination(nouvelAxe, coords[coords.length - 1]);
+      }
+
+      v.missionSeqIdx  = mission.prochainSeqIdx;
+      v.currentMission = {
+        type:                  mission.missionType,
+        durationAtDestination: mission.duree,
+        parkingTimer:          0,
+      };
+      v.mission    = `${type.label} : ${mission.label} — ${v.labelRoute}`;
+      v.status     = STATUT_DRIVING;
+      v.vitesseKmh = rnd(type.vitesseMin, type.vitesseMax);
+      v.arrete     = false;
+    }
+    return null;
+  }
+
+  // ── ETAT DRIVING ──────────────────────────────────────────────────────────
+  const coords = routesDict?.[v?.cleRoute];
+  if (!Array.isArray(coords) || coords.length < 2) return null;
+
   const type       = TYPES_VEHICULES[v.typeKey] ?? TYPES_VEHICULES.PARTICULIER;
   const nbSegments = coords.length - 1;
-  let anomalie     = null;
 
-  if (nbSegments < 1) return null;
-
-  // ── Gestion arrêt / mouvement ────────────────────────────────────────────
   if (!v.arrete) {
-    // Événement de choc
-    if (!v.chocDetecte && Math.random() < type.chocChance * deltaSecondes * 15) {
-      v.chocDetecte  = true;
-      v.arrete       = true;
-      v.dureeArretMs = 0;
-      anomalie = creerAnomalie(
-        'critical',
-        `CAP-TRF-${String(v.id % 99).padStart(2, '0')}`,
-        v.labelRoute,
-        `Accident detecte : ${v.typeLabel} — capteur de choc declenche. ` +
-        `Vitesse avant impact : ${Math.round(v.vitesseKmh)} km/h. ` +
-        `Mission : ${v.mission}. Axe : ${v.labelRoute}, Fianarantsoa.`,
-        v.lat, v.lng,
-      );
-    // Arrêt normal (feu, passager, congestion)
-    } else if (Math.random() < type.arretChance * deltaSecondes * 10) {
+    if (Math.random() < type.arretChance * deltaSecondes * 3) {
       v.arrete       = true;
       v.dureeArretMs = 0;
     }
   } else {
     v.dureeArretMs += deltaSecondes * 1000;
-
-    // Durée d'arrêt : courte pour Taxi-be (arrêt voyageur), longue pour autres
-    const dureeMax = type.arretChance > 0.05
-      ? rnd(1200, 4000)
-      : rnd(2500, 8000);
+    const dureeMax = v.enAlerte === 'critical'
+      ? rnd(DUREE_ACCIDENT_MIN_MS, DUREE_ACCIDENT_MAX_MS)
+      : (type.arretChance > 0.05 ? rnd(1200, 4000) : rnd(2500, 8000));
 
     if (v.dureeArretMs >= dureeMax) {
-      // Reprise du mouvement
       v.arrete       = false;
       v.dureeArretMs = 0;
       v.chocDetecte  = false;
-      v.vitesseKmh   = jitter(v.vitesseKmh, 8, type.vitesseMin, type.vitesseMax);
+      if (v.enAlerte) { v.enAlerte = null; v.couleur = v.couleurBase; }
+      v.vitesseKmh = jitter(v.vitesseKmh, 8, type.vitesseMin, type.vitesseMax);
     } else {
-      // Alerte embouteillage après 3 secondes d'immobilisation (hors Taxi-be)
-      if (
-        v.typeKey !== 'TAXIBE' &&
-        v.dureeArretMs >= 3000 &&
-        v.dureeArretMs < 3000 + deltaSecondes * 1000
-      ) {
-        anomalie = creerAnomalie(
-          'warning',
-          `CAP-TRF-${String(v.id % 99).padStart(2, '0')}`,
-          v.labelRoute,
-          `${v.typeLabel} immobilise depuis ${Math.round(v.dureeArretMs / 1000)} s. ` +
-          `Embouteillage ou panne probable. Axe : ${v.labelRoute}, Fianarantsoa.`,
-          v.lat, v.lng,
-        );
-      }
-      return anomalie;  // Pas de mise à jour de position pendant l'arrêt
+      return null;
     }
   }
 
-  // ── Avancement LERP sur le rail ──────────────────────────────────────────
-  // Conversion vitesse : km/h → degrés/s (1 deg ≈ 111 km)
-  const vitesseDegSec = (v.vitesseKmh * DEG_PER_KM) / 3600;
+  const facteurRalentissement = calculerFacteurRalentissement(v.cleRoute, v.segIdx, indexSegmentsImpactes);
+  const vitesseEffectiveKmh   = v.vitesseKmh * facteurRalentissement;
+  const vitesseDegSec         = (vitesseEffectiveKmh * DEG_PAR_KM) / 3600;
 
-  // Plafond de sécurité : jamais plus d'1.5 segments par frame
-  // (empêche la téléportation à très faible FPS)
-  let distanceRestante = Math.min(
-    vitesseDegSec * deltaSecondes,
-    (nbSegments * 1.5) / 100,
-  );
-
+  let distanceRestante = Math.min(vitesseDegSec * deltaSecondes, (nbSegments * 1.5) / 100);
   let segIdx = v.segIdx;
   let segT   = v.segT;
   let avance = v.avance;
 
-  // Boucle de report de surplus sur les segments suivants
   for (let iter = 0; iter < 4 && distanceRestante > 1e-10; iter++) {
     const iA = clamp(segIdx,     0, coords.length - 1);
     const iB = clamp(segIdx + 1, 0, coords.length - 1);
@@ -509,31 +378,30 @@ function avancerVehicule(v, deltaSecondes) {
 
     const longueur = longueurSegment(a, b);
     if (longueur < 1e-10) {
-      // Segment dégénéré (deux points identiques) — on passe au suivant
       segIdx = avance ? segIdx + 1 : segIdx - 1;
       segT   = avance ? 0 : 1;
-      distanceRestante = 0;
       break;
     }
 
-    // Incrément de t correspondant à la distance restante
     const dt = distanceRestante / longueur;
 
     if (avance) {
       segT += dt;
       if (segT >= 1) {
         distanceRestante = (segT - 1) * longueur;
-        segT  = 0;
+        segT   = 0;
         segIdx++;
         if (segIdx >= nbSegments) {
-          // Fin du trajet aller — demi-tour
-          segIdx        = nbSegments - 1;
-          segT          = 1;
-          avance        = false;
-          distanceRestante = 0;
-          v.phaseTrajet = 1;
-          v.destination = nomWaypoint(v.cleRoute, 0);
-          v.mission     = `${v.typeLabel} : Retour — direction ${v.destination}`;
+          segIdx = nbSegments - 1;
+          segT   = 1;
+          v.lat  = coords[coords.length - 1][0];
+          v.lng  = coords[coords.length - 1][1];
+          v.status  = STATUT_PARKED;
+          v.arrete  = true;
+          v.segIdx  = segIdx;
+          v.segT    = segT;
+          v.mission = `${v.typeLabel} : Gare — ${v.destination}`.trim();
+          return null;
         }
       } else {
         distanceRestante = 0;
@@ -544,207 +412,316 @@ function avancerVehicule(v, deltaSecondes) {
         distanceRestante = Math.abs(segT) * longueur;
         segT   = 1;
         segIdx--;
-        if (segIdx < 0) {
-          // Fin du retour — reprise du trajet aller
-          segIdx        = 0;
-          segT          = 0;
-          avance        = true;
-          distanceRestante = 0;
-          v.phaseTrajet = 0;
-          const dest    = nomWaypoint(v.cleRoute, coords.length - 1);
-          v.destination = dest;
-          v.mission     = `${v.typeLabel} : Reprise service — direction ${dest}`;
-        }
+        if (segIdx < 0) { segIdx = 0; segT = 0; avance = true; distanceRestante = 0; }
       } else {
         distanceRestante = 0;
       }
     }
   }
 
-  // ── Interpolation GPS finale — position UNIQUEMENT sur le segment ─────────
   const iAFinal = clamp(segIdx,     0, coords.length - 1);
   const iBFinal = clamp(segIdx + 1, 0, coords.length - 1);
   const aFinal  = coords[iAFinal];
   const bFinal  = coords[iBFinal];
 
   if (aFinal && bFinal) {
-    const t  = clamp(segT, 0, 1);
-    v.lat    = lerp(aFinal[0], bFinal[0], t);
-    v.lng    = lerp(aFinal[1], bFinal[1], t);
+    const t = clamp(segT, 0, 1);
+    v.lat   = lerp(aFinal[0], bFinal[0], t);
+    v.lng   = lerp(aFinal[1], bFinal[1], t);
   }
 
-  // Mise à jour de l'état de mouvement
   v.segIdx     = clamp(segIdx, 0, nbSegments - 1);
   v.segT       = clamp(segT, 0, 1);
   v.avance     = avance;
   v.vitesseKmh = jitter(v.vitesseKmh, 0.4, type.vitesseMin, type.vitesseMax);
 
-  return anomalie;
+  return null;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// HOOK PRINCIPAL
-// ═════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────────────────────
+// Regulateurs centralises
+// ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * useCitySimulation
- *
- * Retourne :
- *   simulationRef  — référence mutable lue par le canvas de CityMap à 60 FPS
- *   metrics        — tableau de métriques (React state, mis à jour toutes 2.5s)
- *   anomalies      — tableau d'alertes (React state, mis à jour à chaque événement)
- *   kpis           — compteurs synthétiques (React state)
- *
- * CityMap accède à simulationRef.current.vehicles directement dans sa boucle
- * canvas — AUCUN re-render React n'est déclenché par le mouvement des véhicules.
- */
+function verifierAccidentRare(sim) {
+  const actifs = sim.vehicles.filter(v => v.enAlerte === 'critical').length;
+  if (actifs >= MAX_ACCIDENTS_SIMULTANES) return null;
+  if (Math.random() >= PROBABILITE_ACCIDENT_PAR_TICK) return null;
+
+  const candidats = sim.vehicles.filter(v => v.status === STATUT_DRIVING && !v.enAlerte);
+  if (candidats.length === 0) return null;
+
+  const v = candidats[rndInt2(0, candidats.length - 1)];
+  v.enAlerte     = 'critical';
+  v.couleur      = COULEUR_ALERTE_CRITIQUE;
+  v.arrete       = true;
+  v.dureeArretMs = 0;
+  v.chocDetecte  = true;
+
+  return creerAnomalie(
+    'critical',
+    `CAP-TRF-${String(v.id % 99).padStart(2, '0')}`,
+    v.labelRoute,
+    `Accident detecte : ${v.typeLabel} — choc enregistre par capteur embarque. ` +
+    `Vitesse avant impact : ${Math.round(v.vitesseKmh)} km/h. ` +
+    `Mission : ${v.mission}. Axe : ${v.labelRoute}, Fianarantsoa.`,
+    v.lat, v.lng,
+  );
+}
+
+function ajusterCongestion(sim, maintenant, refs) {
+  const intervalleCible = rnd(AJUSTEMENT_CONGESTION_INTERVALLE_MIN_MS, AJUSTEMENT_CONGESTION_INTERVALLE_MAX_MS);
+  if (maintenant - refs.dernierAjustementCongestion.current < intervalleCible) return null;
+  refs.dernierAjustementCongestion.current = maintenant;
+
+  const direction   = Math.random() < 0.5 ? -1 : 1;
+  const niveauAvant = refs.congestionNiveau.current;
+  refs.congestionNiveau.current = clamp(niveauAvant + direction, 0, CONGESTION_NIVEAU_MAX);
+  const augmente = refs.congestionNiveau.current > niveauAvant;
+
+  const vehiculesEnWarning = sim.vehicles.filter(v => v.enAlerte === 'warning');
+
+  if (augmente) {
+    const bassinPrioritaire = sim.vehicles.filter(v => v.status === STATUT_DRIVING && v.arrete && !v.enAlerte);
+    const bassin = bassinPrioritaire.length > 0
+      ? bassinPrioritaire
+      : sim.vehicles.filter(v => v.status === STATUT_DRIVING && !v.enAlerte);
+
+    if (bassin.length === 0) return null;
+
+    const v = bassin[rndInt2(0, bassin.length - 1)];
+    v.enAlerte = 'warning';
+    v.couleur  = COULEUR_ALERTE_WARNING;
+    if (!v.arrete) { v.arrete = true; v.dureeArretMs = 0; }
+
+    return creerAnomalie(
+      'warning',
+      `CAP-TRF-${String(v.id % 99).padStart(2, '0')}`,
+      v.labelRoute,
+      `${v.typeLabel} immobilise — accumulation de trafic. Axe : ${v.labelRoute}, Fianarantsoa.`,
+      v.lat, v.lng,
+    );
+  }
+
+  if (vehiculesEnWarning.length > 0) {
+    const v = vehiculesEnWarning[rndInt2(0, vehiculesEnWarning.length - 1)];
+    v.enAlerte     = null;
+    v.couleur      = v.couleurBase;
+    v.arrete       = false;
+    v.dureeArretMs = 0;
+  }
+
+  return null;
+}
+
+function ajusterPollutionParAxe(sim) {
+  const routesDict = sim.routes ?? {};
+  const vehicules  = sim.vehicles ?? [];
+
+  const statsParAxe = {};
+  for (const v of vehicules) {
+    if (!v?.cleRoute) continue;
+    const s = statsParAxe[v.cleRoute] ?? (statsParAxe[v.cleRoute] = { total: 0, bloques: 0, alertes: 0 });
+    s.total++;
+    if (v.arrete)   s.bloques++;
+    if (v.enAlerte) s.alertes++;
+  }
+
+  let axeLePlusPollue = null;
+  let indiceMax       = -1;
+
+  for (const cle of Object.keys(routesDict)) {
+    const coords = routesDict[cle];
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+
+    const s            = statsParAxe[cle] ?? { total: 0, bloques: 0, alertes: 0 };
+    const ratioBloques = s.total > 0 ? s.bloques / s.total : 0;
+    const bonusAlerte  = s.total > 0 ? (s.alertes / s.total) * 0.5 : 0;
+    const cible        = clamp((ratioBloques + bonusAlerte) * 100, 0, 100);
+
+    const actuel = coords.pollutionIndex ?? 0;
+    const delta  = cible > actuel
+      ? (cible - actuel) * TAUX_ACCUMULATION_POLLUTION
+      : (cible - actuel) * TAUX_DISSIPATION_POLLUTION;
+
+    coords.pollutionIndex = clamp(actuel + delta, 0, 100);
+
+    if (coords.pollutionIndex > indiceMax) {
+      indiceMax       = coords.pollutionIndex;
+      axeLePlusPollue = cle;
+    }
+  }
+
+  return { axeLePlusPollue, indiceMax: Math.max(0, indiceMax) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook principal
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hook principal
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function useCitySimulation() {
 
-  // ── État mutable partagé avec le canvas ────────────────────────────────────
+  // ✅ FIX RACINE — le tick DOIT être déclaré ICI, à l'intérieur du hook
+  const [tick, setTick] = useState(0);
+
+  const congestionNiveau            = useRef(0);
+  const dernierAjustementCongestion = useRef(performance.now());
+  const dernierAjustementPollution  = useRef(performance.now());
+  const intervalleProchainPollution = useRef(rnd(INTERVALLE_POLLUTION_MIN_MS, INTERVALLE_POLLUTION_MAX_MS));
+
   const simulationRef = useRef(null);
   if (simulationRef.current === null) {
     simulationRef.current = {
-      vehicles:  construireVehicules(),
-      metriques: construireMetriquesInitiales(),
+      vehicles:  [],
+      routes:    {},
+      metriques: construireMetriques(),
       anomalies: [],
     };
   }
 
-  // ── État React (panneaux latéraux uniquement) ─────────────────────────────
-  const [metrics,   setMetrics]   = useState(() =>
-    Object.values(construireMetriquesInitiales()).map(m => ({
-      ...m,
-      value: m.valeur,
-      status: m.statut,
-    }))
-  );
+  const [metrics,   setMetrics]   = useState(() => Object.values(construireMetriques()));
   const [anomalies, setAnomalies] = useState([]);
-  const [kpis,      setKpis]      = useState({
-    vehicles:   BLUEPRINT_FLOTTE.length,
-    accidents:  0,
-    congestion: 0,
-  });
+  const [kpis,      setKpis]      = useState({ vehicles: 0, accidents: 0, congestion: 0 });
+  const [loading,   setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState(null);
 
-  // ── Références internes de la boucle rAF ──────────────────────────────────
   const anomaliesEnAttente = useRef([]);
   const dernierTickLent    = useRef(performance.now());
   const derniereFrame      = useRef(performance.now());
   const rafId              = useRef(null);
 
-  // ── Boucle d'animation principale ─────────────────────────────────────────
+  useEffect(() => {
+    let annule = false;
+    fetch(URL_ROUTES)
+      .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
+      .then(data => {
+        if (annule) return;
+        const routesDict = normaliserRoutes(data);
+        const nbAxes = Object.keys(routesDict).length;
+        if (nbAxes === 0) {
+          setLoadError('Aucun axe valide trouve dans routes_output.json.');
+          setLoading(false);
+          return;
+        }
+        const vehicules = construireVehicules(routesDict, 150);
+        simulationRef.current.routes   = routesDict;
+        simulationRef.current.vehicles = vehicules;
+        setKpis({ vehicles: vehicules.length, accidents: 0, congestion: 0 });
+        setLoading(false);
+      })
+      .catch(err => {
+        if (!annule) {
+          setLoadError(`Echec du chargement des routes : ${err.message}`);
+          setLoading(false);
+        }
+      });
+    return () => { annule = true; };
+  }, []);
+
+  // ── Boucle d'animation 60 FPS — TOURNE EN PERMANENCE, indépendante de l'onglet ──
   const animer = useCallback(() => {
     const maintenant = performance.now();
-    const deltaSec   = clamp((maintenant - derniereFrame.current) / 1000, 0, 0.1);
+    const deltaSec    = clamp((maintenant - derniereFrame.current) / 1000, 0, 0.1);
     derniereFrame.current = maintenant;
 
     const sim = simulationRef.current;
-    if (!sim) { rafId.current = requestAnimationFrame(animer); return; }
 
-    // Avancer tous les véhicules sur leurs rails
-    for (let i = 0; i < sim.vehicles.length; i++) {
-      const anomalie = avancerVehicule(sim.vehicles[i], deltaSec);
-      if (anomalie) anomaliesEnAttente.current.push(anomalie);
+    if (sim?.vehicles?.length > 0) {
+      for (let i = 0; i < sim.vehicles.length; i++) {
+        avancerVehicule(sim.vehicles[i], deltaSec, sim.routes);
+      }
+      // Signal léger 60 FPS — le canvas lit simulationRef directement (mutation),
+      // ce tick sert uniquement à forcer React à re-render les composants CityMap
+      // qui reçoivent `tick` en prop (utile pour les popups/tooltips React-Leaflet).
+      setTick(t => (t + 1) & 0xFFFFFF);
     }
 
-    // ── Tick lent : mise à jour React toutes les 2.5 s ───────────────────────
-    if (maintenant - dernierTickLent.current >= SLOW_TICK_MS) {
+    if (maintenant - dernierTickLent.current >= INTERVALLE_TICK_LENT_MS) {
       dernierTickLent.current = maintenant;
 
-      const picPolluant = Math.random() < 0.07;
-      const m           = sim.metriques;
-      const horodatage  = new Date().toISOString();
+      const m          = sim.metriques;
+      const horodatage = new Date().toISOString();
 
-      const valCO2    = picPolluant ? jitter(m.co2.valeur, 92, 380, 920) : jitter(m.co2.valeur, 5, 380, 480);
-      const valPM25   = picPolluant ? jitter(m.pm25.valeur, 18, 10, 68) : jitter(m.pm25.valeur, 2, 10, 28);
-      const valTrafic = jitter(m.trafic.valeur, 4, 30, 92);
+      const anomalieAccident = verifierAccidentRare(sim);
+      if (anomalieAccident) anomaliesEnAttente.current.push(anomalieAccident);
 
-      sim.metriques = {
-        co2: {
-          ...m.co2,
-          valeur: valCO2,
-          value:  valCO2,
-          fill:   Math.round((valCO2 / m.co2.max) * 100),
-          statut: calcStatut(valCO2, 450, 700),
-          status: calcStatut(valCO2, 450, 700),
-          updatedAt: horodatage,
-        },
-        pm25: {
-          ...m.pm25,
-          valeur: valPM25,
-          value:  valPM25,
-          fill:   Math.round((valPM25 / m.pm25.max) * 100),
-          statut: calcStatut(valPM25, 25, 50),
-          status: calcStatut(valPM25, 25, 50),
-          updatedAt: horodatage,
-        },
-        trafic: {
-          ...m.trafic,
-          valeur: valTrafic,
-          value:  valTrafic,
-          fill:   valTrafic,
-          statut: calcStatut(valTrafic, 65, 85),
-          status: calcStatut(valTrafic, 65, 85),
-          updatedAt: horodatage,
-        },
-      };
+      const anomalieCongestion = ajusterCongestion(sim, maintenant, {
+        congestionNiveau, dernierAjustementCongestion,
+      });
+      if (anomalieCongestion) anomaliesEnAttente.current.push(anomalieCongestion);
 
-      // Anomalie de pic de pollution
-      if (picPolluant && valCO2 > 500) {
-        const zones = ['Centre-Ville', 'Gare FCE', 'Tanambao', 'Anjoma', 'Haute Ville', 'Tsianolondroa'];
-        const zone  = zones[rndInt(0, zones.length - 1)];
-        anomaliesEnAttente.current.push(creerAnomalie(
-          valCO2 > 700 ? 'critical' : 'warning',
-          `CAP-ENV-${rndInt(10, 99)}`,
-          zone,
-          `Pic de pollution atmospherique : CO2 ${valCO2.toFixed(0)} ppm, PM2.5 ${valPM25.toFixed(1)} ug/m3. ` +
-          `Secteur : ${zone}, Fianarantsoa.`,
-          ...CITY_CENTER,
-        ));
+      let valCO2  = m.co2.value;
+      let valPM25 = m.pm25.value;
+
+      if (maintenant - dernierAjustementPollution.current >= intervalleProchainPollution.current) {
+        dernierAjustementPollution.current  = maintenant;
+        intervalleProchainPollution.current = rnd(INTERVALLE_POLLUTION_MIN_MS, INTERVALLE_POLLUTION_MAX_MS);
+
+        const { axeLePlusPollue, indiceMax } = ajusterPollutionParAxe(sim);
+
+        const cibleCO2  = 395 + (indiceMax / 100) * 220;
+        const ciblePM25 = 10  + (indiceMax / 100) * 65;
+
+        valCO2  = jitter(m.co2.value,  6, cibleCO2  - 15, cibleCO2  + 15);
+        valPM25 = jitter(m.pm25.value, 2, ciblePM25 - 5,  ciblePM25 + 5);
+
+        if (axeLePlusPollue && indiceMax >= SEUIL_POLLUTION_ANOMALIE) {
+          const coordsAxe = sim.routes[axeLePlusPollue];
+          const ptMilieu  = coordsAxe?.[Math.floor(coordsAxe.length / 2)] ?? CITY_CENTER;
+          const cause     = tirerCausePollution(); // ✅ cause aléatoire diversifiée
+        
+          const anomaliePollution = creerAnomalie(
+            indiceMax >= 85 ? 'critical' : 'warning',
+            `CAP-ENV-${rndInt(10, 99)}`,
+            axeLePlusPollue.replace(/_/g, ' '),
+            `Pic de pollution localise sur l'axe ${axeLePlusPollue.replace(/_/g, ' ')} : ` +
+            `indice ${Math.round(indiceMax)}/100, PM2.5 estime ${Math.round(ciblePM25)} µg/m3. ` +
+            `Cause : ${cause}`,
+            ptMilieu[0], ptMilieu[1],
+          );
+          anomaliePollution.pollutionIndex = Math.round(indiceMax);
+          anomaliePollution.pm25Valeur     = Math.round(ciblePM25);
+          anomaliePollution.causePollution = cause; // ✅ champ dédié, réutilisable par le rapport IA
+        
+          anomaliesEnAttente.current.push(anomaliePollution);
+        }
       }
 
-      // Fusion et publication des anomalies
+      const valTrafic = jitter(m.traffic.value, 4, 28, 90);
+
+      sim.metriques = {
+        co2:     { ...m.co2,     value: Math.round(valCO2),  fill: Math.round((valCO2 / m.co2.max) * 100),  status: calcStatut(valCO2, 450, 600),  updatedAt: horodatage },
+        pm25:    { ...m.pm25,    value: parseFloat(valPM25.toFixed(1)), fill: Math.round((valPM25 / m.pm25.max) * 100), status: calcStatut(valPM25, 15, 30), updatedAt: horodatage },
+        traffic: { ...m.traffic, value: Math.round(valTrafic), fill: Math.round(valTrafic), status: calcStatut(valTrafic, 65, 85), updatedAt: horodatage },
+      };
+
+      setMetrics(Object.values(sim.metriques));
+
+      const accidentsActifs = sim.vehicles.filter(v => v.enAlerte === 'critical').length;
+      setKpis({
+        vehicles:   sim.vehicles.length,
+        accidents:  accidentsActifs,
+        congestion: sim.anomalies.filter(a => a.priority === 'warning').length,
+      });
+
       if (anomaliesEnAttente.current.length > 0) {
         sim.anomalies = [...anomaliesEnAttente.current, ...sim.anomalies].slice(0, MAX_ANOMALIES);
         anomaliesEnAttente.current = [];
         setAnomalies([...sim.anomalies]);
       }
-
-      // Comptage des incidents récents pour les KPI
-      const recents    = sim.anomalies.slice(0, 12);
-      const accidents  = recents.filter(a => a.priority === 'critical').length;
-      const congestion = recents.filter(a => a.priority === 'warning').length;
-
-      // Conversion vers le format attendu par Metrics.jsx
-      setMetrics(Object.values(sim.metriques).map(m => ({
-        id:        m.id,
-        label:     m.label,
-        sublabel:  m.sublabel,
-        value:     Math.round(m.valeur * 10) / 10,
-        unit:      m.unite,
-        max:       m.max,
-        fill:      m.fill,
-        status:    m.statut,
-        updatedAt: m.updatedAt,
-      })));
-
-      setKpis({
-        vehicles:   sim.vehicles.length,
-        accidents,
-        congestion,
-      });
     }
 
     rafId.current = requestAnimationFrame(animer);
   }, []);
 
-  // ── Cycle de vie du hook ───────────────────────────────────────────────────
   useEffect(() => {
     derniereFrame.current = performance.now();
     rafId.current = requestAnimationFrame(animer);
-    return () => {
-      if (rafId.current) cancelAnimationFrame(rafId.current);
-    };
+    return () => { if (rafId.current) cancelAnimationFrame(rafId.current); };
   }, [animer]);
 
-  return { simulationRef, metrics, anomalies, kpis };
+  return { simulationRef, tick, metrics, anomalies, kpis, loading, loadError };
 }
