@@ -1,0 +1,119 @@
+@startuml
+skinparam linetype ortho
+skinparam defaultFontSize 13
+skinparam defaultFontColor #E0E0E0
+skinparam roundcorner 12
+skinparam ArrowColor #64B5F6
+skinparam ArrowFontColor #B0BEC5
+skinparam ArrowFontSize 11
+skinparam ArrowThickness 1.5
+
+skinparam class {
+  BorderColor #3A3F5C
+  BackgroundColor #1E2140
+  HeaderBackgroundColor #252845
+  FontColor #82AAFF
+  FontStyle bold
+  AttributeFontColor #C0CAF5
+  AttributeFontSize 12
+  BorderThickness 1.5
+}
+
+skinparam package {
+  BorderColor #3F51B5
+  BackgroundColor #12132A
+  FontColor #90CAF9
+  FontStyle bold
+  BorderThickness 2
+}
+
+hide circle
+hide empty members
+
+title M'LAM — Diagramme de Classes (Fianarantsoa)
+
+package "Simulation" {
+
+  class Simulation {
+    + tick(deltaSecondes : number) : void
+    + getReport() : string
+    + nettoyerAnomaliesExpirees() : void
+  }
+
+  class Vehicule {
+    - id : string
+    - status : StatusVehicule
+    - lat : number
+    - lng : number
+    - vitesseKmh : number
+    - legalStatus : LegalStatus
+  }
+
+  class Mission {
+    - type : TypeMission
+    - parkingTimer : number
+    - durationAtDestination : number
+    + demarrer() : void
+    + terminer() : void
+  }
+
+  class Anomalie {
+    - id : string
+    - priority : string
+    - type : string
+    - segmentId : string
+    - expireAt : number
+    + estExpiree() : boolean
+  }
+
+  class Route {
+    - cle : string
+    - coords : number[][]
+    + longueur() : number
+    + pointParIndex(idx : number) : number[]
+  }
+
+  class Metriques {
+    - co2 : number
+    - pm25 : number
+    - traffic : number
+    + calculerFluidite() : number
+    + compterAlertes() : number
+    + calcStatut(valeur : number) : string
+  }
+
+}
+
+package "Système d'IA" {
+
+  class GeminiService {
+    - apiKey : string
+    - model : string
+    + genererRapport(anomalie : Anomalie) : RapportIA
+    + analyzeUrbanStatus(metriques : Metriques) : string
+  }
+
+  class RapportIA {
+    - contenu : string
+    - timestamp : number
+    - source : string
+    - erreur : string
+    + formaterPourMedd() : string
+  }
+
+}
+
+' ── Relations ──────────────────────────────────────
+
+Simulation "1" *-down- "0..*"  Vehicule  : surveille
+Simulation "1" *-down- "0..25" Anomalie  : produit
+Simulation "1" *-right- "1"    Metriques : mesure
+Simulation "1" o-down- "1..*"  Route     : couvre
+
+Vehicule "1" *-down- "1"   Mission  : possède
+Vehicule      -right-> "0..1" Anomalie : déclenche
+
+GeminiService  ..down.> RapportIA : <<crée>>
+RapportIA -left-> "0..*" Anomalie  : référence
+
+@enduml
