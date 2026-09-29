@@ -31,7 +31,7 @@ const VUES = [
   { id: 'dashboard',  label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'carte_pure', label: 'Carte',     Icon: Map             },
   { id: 'alertes',    label: 'Alertes',   Icon: ShieldAlert     },
-  { id: 'parametres', label: 'Réglages',  Icon: Settings        },
+  { id: 'parametres', label: 'Paramètres', Icon: Settings       },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -132,74 +132,60 @@ function MobileHeader({ vue, nbCritiques }) {
 // ─────────────────────────────────────────────────────────────────────────────
 function NavLaterale({ vueApp, onChangeVue }) {
   return (
-    <nav className="group/nav hidden md:flex" style={{
-      position: 'fixed', top: 0, left: 0, zIndex: 50,
-      flexDirection: 'column', height: '100vh', overflow: 'hidden',
-      width: '64px', transition: 'width 0.3s ease',
-      background: 'rgba(15,23,42,0.95)', backdropFilter: 'blur(12px)',
-      borderRight: '1px solid rgba(30,41,59,1)',
-    }}
-    onMouseEnter={e => e.currentTarget.style.width = '256px'}
-    onMouseLeave={e => e.currentTarget.style.width = '64px'}
-    >
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: '12px',
-        height: '48px', padding: '0 16px', flexShrink: 0,
-        borderBottom: '1px solid rgba(30,41,59,0.8)', overflow: 'hidden',
-      }}>
-        <span style={{
-          width: '28px', height: '28px', borderRadius: '8px', flexShrink: 0,
-          background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.3)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <LayoutDashboard size={14} color="#818cf8" />
+    <nav className={[
+      'group/nav',
+      'fixed top-0 left-0 z-50',
+      'flex flex-col h-screen overflow-hidden',
+      'w-16 hover:w-64',
+      'transition-all duration-300 ease-in-out',
+      'bg-slate-900/95 backdrop-blur-md',
+      'border-r border-slate-800',
+    ].join(' ')}>
+
+      <div className="flex items-center gap-3 h-12 px-4 shrink-0 border-b border-slate-800/80 overflow-hidden">
+        <span className="flex items-center justify-center h-7 w-7 rounded-lg bg-indigo-500/15 border border-indigo-500/30 shrink-0">
+          <LayoutDashboard size={14} strokeWidth={2} className="text-indigo-400" />
         </span>
-        <span style={{
-          fontSize: '11px', fontWeight: 700, letterSpacing: '0.1em',
-          color: '#e2e8f0', whiteSpace: 'nowrap', opacity: 0,
-          transition: 'opacity 0.2s 0.1s',
-        }} className="group-hover/nav:opacity-100">M'LAM</span>
+        <span className="text-xs font-bold tracking-widest uppercase text-slate-200 whitespace-nowrap opacity-0 group-hover/nav:opacity-100 transition-opacity duration-200 delay-100">
+          M&apos;LAM
+        </span>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '12px 8px', flex: 1 }}>
+      <div className="flex flex-col gap-1 px-2 py-3 flex-1">
         {VUES.map(({ id, label, Icon }) => {
           const actif = vueApp === id;
           return (
-            <button key={id} type="button" onClick={() => onChangeVue(id)} style={{
-              display: 'flex', alignItems: 'center', gap: '12px',
-              height: '40px', padding: '0 12px', borderRadius: '8px', width: '100%',
-              border: actif ? '1px solid rgba(99,102,241,0.4)' : '1px solid transparent',
-              background: actif ? 'rgba(99,102,241,0.15)' : 'transparent',
-              color: actif ? '#818cf8' : '#64748b', cursor: 'pointer',
-              fontSize: '11px', fontWeight: 700, letterSpacing: '0.08em',
-              textTransform: 'uppercase', whiteSpace: 'nowrap',
-              transition: 'all 0.2s',
-            }}>
-              <Icon size={16} strokeWidth={2} style={{ flexShrink: 0 }} />
-              <span style={{ opacity: 0, transition: 'opacity 0.2s 0.1s' }}
-                className="group-hover/nav:opacity-100">{label}</span>
+            <button
+              key={id}
+              type="button"
+              onClick={() => onChangeVue(id)}
+              aria-current={actif ? 'page' : undefined}
+              className={[
+                'flex items-center gap-3 h-10 px-3 rounded-lg shrink-0 w-full',
+                'font-mono text-xs font-semibold uppercase tracking-wider',
+                'transition-all duration-200 ease-out',
+                actif
+                  ? 'bg-indigo-500/15 border border-indigo-400/40 text-indigo-300 shadow-[0_0_12px_-4px_rgba(99,102,241,0.5)]'
+                  : 'border border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/60',
+              ].join(' ')}
+            >
+              <Icon size={16} strokeWidth={2} className="shrink-0" />
+              <span className="whitespace-nowrap opacity-0 group-hover/nav:opacity-100 transition-opacity duration-200 delay-100">
+                {label}
+              </span>
             </button>
           );
         })}
       </div>
 
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: '12px',
-        height: '44px', padding: '0 16px', flexShrink: 0,
-        borderTop: '1px solid rgba(30,41,59,0.8)', overflow: 'hidden',
-      }}>
-        <span style={{ position: 'relative', width: '8px', height: '8px', flexShrink: 0 }}>
-          <span style={{
-            position: 'absolute', inset: 0, borderRadius: '50%',
-            background: 'rgba(16,185,129,0.5)', animation: 'ping 1s infinite',
-          }} />
-          <span style={{ position: 'relative', width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'block' }} />
+      <div className="flex items-center gap-3 h-11 px-4 shrink-0 border-t border-slate-800/80 overflow-hidden">
+        <span className="relative flex items-center justify-center h-2 w-2 shrink-0">
+          <span className="absolute inset-0 rounded-full bg-emerald-500/50 animate-ping" />
+          <span className="relative h-2 w-2 rounded-full bg-emerald-500" />
         </span>
-        <span style={{
-          fontSize: '11px', fontWeight: 700, color: '#10b981',
-          letterSpacing: '0.1em', whiteSpace: 'nowrap', opacity: 0,
-          transition: 'opacity 0.2s 0.1s',
-        }} className="group-hover/nav:opacity-100">LIVE</span>
+        <span className="text-xs font-mono text-emerald-400 uppercase tracking-widest whitespace-nowrap opacity-0 group-hover/nav:opacity-100 transition-opacity duration-200 delay-100">
+          Live
+        </span>
       </div>
     </nav>
   );
@@ -715,17 +701,17 @@ function CoquilleDashboard() {
         </header>
 
         {/* Contenu desktop */}
-        <div className="flex flex-1 overflow-hidden">
+        <div className="flex flex-1 overflow-hidden min-w-0">
           {vue==='dashboard' && (<>
-            <aside className="flex flex-col w-[18%] shrink-0 overflow-hidden bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-r border-slate-200 dark:border-slate-800">
+            <aside className="flex flex-col w-[18%] min-w-[220px] shrink-0 overflow-hidden bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-r border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2 px-4 py-3 shrink-0 border-b border-slate-200 dark:border-slate-800">
                 <span className="block h-1 w-4 rounded-full bg-indigo-500" />
                 <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Indicateurs</span>
               </div>
               <Metrics metrics={metrics} kpis={kpis} filtreActif={filtre} onFiltreChange={t=>setFiltre(prev=>prev===t?'tous':t)} />
             </aside>
-            <main className="flex flex-1 flex-col overflow-hidden relative">{carte}</main>
-            <aside className="flex flex-col w-[18%] shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-l border-slate-200 dark:border-slate-800">
+            <main className="flex flex-1 min-w-0 flex-col overflow-hidden relative">{carte}</main>
+            <aside className="flex flex-col w-[18%] min-w-[220px] shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-l border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2 px-4 py-3 shrink-0 border-b border-slate-200 dark:border-slate-800">
                 <Radio size={13} className="text-slate-400 shrink-0" />
                 <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Anomalies</span>
