@@ -1,6 +1,5 @@
 /* src/index.css */
 @import "tailwindcss";
-@import "./design-tokens.css";
 
 /* ─── Viewport mobile robuste ─────────────────────────────────────────── */
 :root {
