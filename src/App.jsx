@@ -501,6 +501,185 @@ export function GrilleMetriques(){
 // ─────────────────────────────────────────────────────────────────────────────
 // CoquilleDashboard — orchestrateur principal
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// DashboardVue — vue d'accueil : KPIs, mini-carte, 3 modules d'analyse
+// ─────────────────────────────────────────────────────────────────────────────
+const CARTE_DASH = 'rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 backdrop-blur-sm';
+const COUL_STATUT = { ok: '#34d399', elevated: '#fbbf24', critical: '#f87171' };
+const COUL_PRIO   = { critical: '#ef4444', warning: '#f59e0b', info: '#6366f1' };
+
+function Sparkline({ data, color, id }) {
+  if (data.length < 2) {
+    return <div className="h-12 flex items-center text-[10px] font-mono text-slate-500">Collecte des données…</div>;
+  }
+  const w = 200, h = 48;
+  const lo = Math.min(...data), hi = Math.max(...data), span = (hi - lo) || 1;
+  const pts = data.map((v, i) => [(i / (data.length - 1)) * w, h - 4 - ((v - lo) / span) * (h - 8)]);
+  const ligne = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const aire = ligne + ' L' + w + ',' + h + ' L0,' + h + ' Z';
+  return (
+    <svg viewBox={'0 0 ' + w + ' ' + h} preserveAspectRatio="none" className="w-full h-12">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={aire} fill={'url(#' + id + ')'} />
+      <path d={ligne} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round"
+        strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function BarreRepartition({ label, n, total, color }) {
+  const pct = total > 0 ? Math.round((n / total) * 100) : 0;
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between text-[11px] font-mono">
+        <span className="text-slate-500 dark:text-slate-400 uppercase tracking-wider">{label}</span>
+        <span className="font-bold tabular-nums" style={{ color }}>{n}</span>
+      </div>
+      <div className="h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700 ease-out"
+          style={{ width: pct + '%', backgroundColor: color }} />
+      </div>
+    </div>
+  );
+}
+
+function TitreModule({ texte, droite }) {
+  return (
+    <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center gap-2">
+        <span className="block h-1 w-4 rounded-full bg-indigo-500" />
+        <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400">{texte}</span>
+      </div>
+      {droite}
+    </div>
+  );
+}
+
+function DashboardVue({ kpis, metrics, anomalies, histo, carte, selecteur, onRapport, onSelect }) {
+  const liste = Array.isArray(anomalies) ? anomalies.filter(Boolean) : [];
+  const met = (id) => (Array.isArray(metrics) ? metrics.find(x => x?.id === id) : null);
+  const co2 = met('co2'), pm = met('pm25');
+  const nbAcc = kpis?.accidents ?? 0, nbCong = kpis?.congestion ?? 0;
+
+  const cartes = [
+    { l: 'Véhicules actifs',   v: kpis?.vehicles ?? 0, c: '#818cf8', Icon: Car,           alerte: false },
+    { l: 'Accidents détectés', v: nbAcc,  c: nbAcc  > 0 ? '#f87171' : '#94a3b8', Icon: AlertTriangle, alerte: nbAcc  > 0 },
+    { l: 'Embouteillages',     v: nbCong, c: nbCong > 0 ? '#fbbf24' : '#94a3b8', Icon: Radio,         alerte: nbCong > 0 },
+  ];
+
+  const parPrio = { critical: 0, warning: 0, info: 0 };
+  const parType = { accident: 0, embouteillage: 0, pollution: 0 };
+  liste.forEach(a => {
+    if (parPrio[a.priority] !== undefined) parPrio[a.priority]++;
+    if (parType[a.type] !== undefined) parType[a.type]++;
+  });
+
+  const courbes = [
+    { id: 'co2', titre: 'CO2',   unite: 'ppm',   m: co2, serie: histo.map(h => h.co2), gid: 'g-co2' },
+    { id: 'pm',  titre: 'PM2.5', unite: 'µg/m³', m: pm,  serie: histo.map(h => h.pm),  gid: 'g-pm'  },
+  ];
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto p-3 md:p-5 flex flex-col gap-3 md:gap-4">
+
+      {/* Rangée 1 — compteurs */}
+      <div className="grid grid-cols-3 gap-2 md:gap-4 shrink-0">
+        {cartes.map(({ l, v, c, Icon, alerte }) => (
+          <div key={l} className={CARTE_DASH + ' relative flex flex-col md:flex-row items-center md:items-center gap-1 md:gap-4 p-2.5 md:p-4 transition-all duration-300 hover:-translate-y-0.5'}>
+            <span className="hidden md:flex items-center justify-center h-11 w-11 rounded-lg shrink-0"
+              style={{ backgroundColor: c + '22' }}>
+              <Icon size={20} style={{ color: c }} className={alerte ? 'animate-pulse' : ''} />
+            </span>
+            <div className="flex flex-col items-center md:items-start min-w-0">
+              <span className="text-xl md:text-3xl font-bold font-mono tabular-nums leading-none" style={{ color: c }}>{v}</span>
+              <span className="mt-1 text-[9px] md:text-[11px] font-semibold uppercase tracking-wider text-slate-500 text-center md:text-left">{l}</span>
+            </div>
+            {alerte && <span className="absolute top-2 right-2 h-2 w-2 rounded-full animate-pulse" style={{ backgroundColor: c }} />}
+          </div>
+        ))}
+      </div>
+
+      {/* Rangée 2 — carte réduite */}
+      <div className="relative shrink-0 h-[280px] md:h-[360px] rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800">
+        {carte}
+        {selecteur}
+      </div>
+
+      {/* Rangée 3 — modules d'analyse */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 md:gap-4 shrink-0 pb-2">
+
+        <div className={CARTE_DASH + ' p-4 flex flex-col'}>
+          <TitreModule texte="Anomalies récentes"
+            droite={<span className="text-[11px] font-mono text-slate-400 tabular-nums">{liste.length}</span>} />
+          {liste.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center py-8 text-xs font-mono text-slate-500">Aucune anomalie active</div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {liste.slice(0, 4).map((a, i) => (
+                <div key={a.id ?? i} onClick={() => onSelect(a)}
+                  className="flex items-start gap-2.5 rounded-lg border border-slate-200 dark:border-slate-800 p-2.5 cursor-pointer hover:bg-slate-100/60 dark:hover:bg-slate-800/40 transition-colors">
+                  <span className="mt-1 h-2 w-2 rounded-full shrink-0 animate-pulse" style={{ backgroundColor: COUL_PRIO[a.priority] ?? '#6366f1' }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 truncate">{a.zone ?? 'Zone inconnue'}</span>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">{a.time ?? '--:--'}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 leading-snug mt-0.5">{a.description}</p>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); onRapport(a); }}
+                      className="mt-1.5 text-[10px] font-mono font-semibold text-indigo-500 dark:text-indigo-400 hover:underline">
+                      Rapport IA →
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className={CARTE_DASH + ' p-4'}>
+          <TitreModule texte="Qualité de l'air"
+            droite={<span className="text-[10px] font-mono text-slate-400">évolution</span>} />
+          <div className="flex flex-col gap-4">
+            {courbes.map(({ id, titre, unite, m, serie, gid }) => {
+              const col = COUL_STATUT[m?.status] ?? '#34d399';
+              return (
+                <div key={id}>
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[11px] font-mono font-semibold text-slate-500 dark:text-slate-400">{titre}</span>
+                    <span className="text-lg font-bold font-mono tabular-nums" style={{ color: col }}>
+                      {m?.value ?? '—'}<span className="ml-1 text-[10px] font-normal text-slate-500">{unite}</span>
+                    </span>
+                  </div>
+                  <Sparkline data={serie} color={col} id={gid} />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className={CARTE_DASH + ' p-4'}>
+          <TitreModule texte="Répartition des anomalies" />
+          <div className="flex flex-col gap-3">
+            <BarreRepartition label="Critiques"      n={parPrio.critical} total={liste.length} color={COUL_PRIO.critical} />
+            <BarreRepartition label="Avertissements" n={parPrio.warning}  total={liste.length} color={COUL_PRIO.warning} />
+            <BarreRepartition label="Informations"   n={parPrio.info}     total={liste.length} color={COUL_PRIO.info} />
+            <div className="h-px bg-slate-200 dark:bg-slate-800 my-1" />
+            <BarreRepartition label="Accidents"      n={parType.accident}      total={liste.length} color="#ef4444" />
+            <BarreRepartition label="Embouteillages" n={parType.embouteillage} total={liste.length} color="#f59e0b" />
+            <BarreRepartition label="Pollution"      n={parType.pollution}     total={liste.length} color="#34d399" />
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
 function CoquilleDashboard() {
   const isMobile  = useIsMobile();
   const [vue,      setVue]      = useState('dashboard');
@@ -512,6 +691,14 @@ function CoquilleDashboard() {
   const [modal, setModal] = useState({ ouvert:false, anomalie:null, chargement:false, rapport:null, source:'simulation', erreur:null });
 
   const { simulationRef, metrics, anomalies, kpis, loading, loadError } = useCitySimulation();
+
+  const [histo, setHisto] = useState([]);
+  useEffect(() => {
+    const c = Array.isArray(metrics) ? metrics.find(x => x?.id === 'co2')?.value  : null;
+    const p = Array.isArray(metrics) ? metrics.find(x => x?.id === 'pm25')?.value : null;
+    if (c == null || p == null) return;
+    setHisto(h => [...h.slice(-29), { co2: c, pm: p }]);
+  }, [metrics]);
 
   useEffect(()=>{ if(simulationRef?.current) simulationRef.current._params={...sim}; },[sim,simulationRef]);
 
@@ -576,33 +763,11 @@ function CoquilleDashboard() {
           display: 'flex', flexDirection: 'column',
         }}>
 
-          {/* DASHBOARD — carte plein écran + KPIs flottants */}
+          {/* DASHBOARD */}
           {vue === 'dashboard' && (
-            <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-              {carte}
-              {selecteurVue}
-              {/* KPIs flottants en bas */}
-              <div style={{
-                position: 'absolute', bottom: '12px', left: '12px', right: '12px',
-                zIndex: 1000, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px',
-              }}>
-                {[
-                  { l:'Véhicules', v:kpis?.vehicles??0,   c:'#818cf8' },
-                  { l:'Accidents', v:kpis?.accidents??0,  c: kpis?.accidents>0?'#f87171':'#94a3b8' },
-                  { l:'Congestion',v:kpis?.congestion??0, c: kpis?.congestion>0?'#fbbf24':'#94a3b8' },
-                ].map(k=>(
-                  <div key={k.l} style={{
-                    background: 'rgba(2,6,23,0.88)',
-                    border: '1px solid rgba(51,65,85,0.7)',
-                    borderRadius: '10px', padding: '8px 6px',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
-                    backdropFilter: 'blur(8px)',
-                  }}>
-                    <span style={{ fontSize: '18px', fontWeight: 700, fontFamily: 'monospace', color: k.c }}>{k.v}</span>
-                    <span style={{ fontSize: '9px', fontWeight: 600, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'center' }}>{k.l}</span>
-                  </div>
-                ))}
-              </div>
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+              <DashboardVue kpis={kpis} metrics={metrics} anomalies={anomalies} histo={histo}
+                carte={carte} selecteur={selecteurVue} onRapport={genRapport} onSelect={a => setAnomAct(a)} />
             </div>
           )}
 
@@ -702,28 +867,12 @@ function CoquilleDashboard() {
 
         {/* Contenu desktop */}
         <div className="flex flex-1 overflow-hidden min-w-0">
-          {vue==='dashboard' && (<>
-            <aside className="flex flex-col w-[18%] min-w-[220px] shrink-0 overflow-hidden bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-r border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-2 px-4 py-3 shrink-0 border-b border-slate-200 dark:border-slate-800">
-                <span className="block h-1 w-4 rounded-full bg-indigo-500" />
-                <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Indicateurs</span>
-              </div>
-              <Metrics metrics={metrics} kpis={kpis} filtreActif={filtre} onFiltreChange={t=>setFiltre(prev=>prev===t?'tous':t)} />
-            </aside>
-            <main className="flex flex-1 min-w-0 flex-col overflow-hidden relative">{carte}</main>
-            <aside className="flex flex-col w-[18%] min-w-[220px] shrink-0 bg-white/70 dark:bg-slate-900/40 backdrop-blur-md border-l border-slate-200 dark:border-slate-800">
-              <div className="flex items-center gap-2 px-4 py-3 shrink-0 border-b border-slate-200 dark:border-slate-800">
-                <Radio size={13} className="text-slate-400 shrink-0" />
-                <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Anomalies</span>
-              </div>
-              <div className="flex-1 overflow-hidden">
-                <Sidebar alerts={anomalies} onGenerateReport={genRapport} onSelectAnomalie={a=>setAnomAct(a)} />
-              </div>
-              <div className="shrink-0 border-t border-slate-200 dark:border-slate-800 p-2">
-                <ZoneIntervention anomalie={anomAct} onFermer={()=>setAnomAct(null)} />
-              </div>
-            </aside>
-          </>)}
+          {vue==='dashboard' && (
+            <main className="flex flex-1 min-w-0 min-h-0 flex-col overflow-hidden">
+              <DashboardVue kpis={kpis} metrics={metrics} anomalies={anomalies} histo={histo}
+                carte={carte} selecteur={null} onRapport={genRapport} onSelect={a => setAnomAct(a)} />
+            </main>
+          )}
           {vue==='carte_pure' && <main className="flex flex-1 flex-col overflow-hidden relative">{carte}</main>}
           {vue==='alertes' && (
             <div className="flex flex-1 overflow-hidden">
